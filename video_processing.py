@@ -7,9 +7,16 @@ usable from a web request handler, a CLI, or tests.
 """
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
+
+# Cap ffmpeg's own thread count. On shared-vCPU containers (Railway's
+# free/trial plan reports the *host's* full CPU count to the process),
+# libx264 will otherwise spin up dozens of threads and can get OOM-killed
+# well before it's CPU-bound. Override with the FFMPEG_THREADS env var.
+FFMPEG_THREADS = os.environ.get("FFMPEG_THREADS", "2")
 
 
 def run(cmd, capture=True):
@@ -22,7 +29,18 @@ def run(cmd, capture=True):
         errors="replace",
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Command failed ({' '.join(cmd)}):\n{result.stderr[-4000:]}")
+        stderr_tail = result.stderr[-4000:] if result.stderr else ""
+        # returncode 137 (128+9) or a negative code (-9) means the process
+        # was killed by SIGKILL, almost always the OS's OOM killer on a
+        # memory-constrained host — that's a clearer diagnosis than
+        # whatever partial ffmpeg output happened to be captured.
+        if result.returncode in (137, -9):
+            raise RuntimeError(
+                "ffmpeg was killed, most likely because the server ran out "
+                "of memory. Try a shorter or lower-resolution video, or "
+                "upgrade the hosting plan for more RAM."
+            )
+        raise RuntimeError(f"Command failed ({' '.join(cmd)}):\n{stderr_tail}")
     return result
 
 
@@ -68,15 +86,21 @@ def get_stream_info(path):
 
 
 def encode_args_for(info, crf_override=None):
-    v_args = ["-c:v", "libx264", "-pix_fmt", info.get("pix_fmt") or "yuv420p"]
+    # "veryfast" trades a little compression efficiency for much lower
+    # memory/CPU use, which matters on a resource-capped host. Bump to
+    # "medium"/"slow" if you're running with more RAM (e.g. Hobby+ plan
+    # or locally).
+    preset = os.environ.get("FFMPEG_PRESET", "veryfast")
+    v_args = ["-c:v", "libx264", "-pix_fmt", info.get("pix_fmt") or "yuv420p",
+              "-threads", FFMPEG_THREADS]
     if crf_override is not None:
-        v_args += ["-crf", str(crf_override), "-preset", "medium"]
+        v_args += ["-crf", str(crf_override), "-preset", preset]
     elif info.get("v_bitrate"):
         kbps = max(int(info["v_bitrate"] / 1000), 300)
         v_args += ["-b:v", f"{kbps}k", "-maxrate", f"{int(kbps*1.5)}k",
-                   "-bufsize", f"{kbps*2}k", "-preset", "medium"]
+                   "-bufsize", f"{kbps*2}k", "-preset", preset]
     else:
-        v_args += ["-crf", "18", "-preset", "medium"]
+        v_args += ["-crf", "18", "-preset", preset]
 
     a_args = ["-c:a", "aac"]
     a_bitrate = info.get("a_bitrate")

@@ -58,6 +58,19 @@ python app.py
   finishes). Gunicorn's timeout is set to 600s in the `Dockerfile` — raise
   it if you expect longer videos, or convert this to a background job queue
   for anything beyond quick clips.
+- **Out-of-memory kills:** on the Free/Trial plan (0.5–1GB RAM), encoding a
+  1080p+ video can get the ffmpeg process killed by the OS if it's allowed
+  to use too many threads/too much buffering. `video_processing.py` caps
+  ffmpeg to 2 threads and uses the `veryfast` preset by default to keep
+  memory use down. Tune with environment variables in the Railway
+  dashboard (Service → Variables) if needed:
+  - `FFMPEG_THREADS` (default `2`) — lower for very tight RAM, raise if
+    you upgrade to a plan with more RAM/CPU.
+  - `FFMPEG_PRESET` (default `veryfast`) — `medium`/`slow` gives smaller,
+    higher-quality output but uses noticeably more RAM.
+  If you still see "ffmpeg was killed" errors, the video's resolution or
+  length is likely too much for the current plan — try a shorter/smaller
+  clip or upgrade.
 
 ## Project structure
 
